@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
 
 export interface SqliteReview {
   id: string;
@@ -21,23 +20,22 @@ export interface ReviewStats {
   totalReviews: number;
 }
 
-interface ReviewRecord {
+interface StoredReview {
   id: string;
-  author_name: string;
-  country: string | null;
+  authorName: string;
+  country?: string;
   city: string;
   rating: number;
   comment: string;
-  transaction_id: string | null;
-  corridor: string;
-  verified: number;
-  ip_address: string;
-  status: string;
-  created_at: string;
+  transactionId?: string;
+  corridor: 'RUSSIA_TO_AFRICA' | 'AFRICA_TO_RUSSIA';
+  verified: boolean;
+  ipAddress?: string;
+  status: 'approved' | 'pending' | 'rejected';
+  createdAt: string;
 }
 
 function getStorageDir(): string {
-  // On Vercel / AWS Lambda, only /tmp is writable
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
     return '/tmp';
   }
@@ -46,9 +44,6 @@ function getStorageDir(): string {
     if (!fs.existsSync(localDir)) {
       fs.mkdirSync(localDir, { recursive: true });
     }
-    const testFile = path.join(localDir, '.write_test');
-    fs.writeFileSync(testFile, '1');
-    fs.unlinkSync(testFile);
     return localDir;
   } catch {
     return '/tmp';
@@ -56,24 +51,25 @@ function getStorageDir(): string {
 }
 
 const STORAGE_DIR = getStorageDir();
-const SQLITE_FILE = path.join(STORAGE_DIR, 'rapidex.sqlite');
 const JSON_FILE = path.join(STORAGE_DIR, 'rapidex_reviews.json');
 
-let storageEngine: 'sqlite' | 'json' = 'sqlite';
-let SQL: SqlJsStatic | null = null;
-let db: Database | null = null;
-let jsonReviews: ReviewRecord[] = [];
+// Optional Upstash / Vercel KV Cloud config for global sync across all visitors
+const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+
+let memoryReviews: StoredReview[] = [];
+let isLoaded = false;
 
 // Simple in-memory IP rate limiter: max 3 submissions per 5 minutes per IP
 const ipSubmissions = new Map<string, number[]>();
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
-  const windowMs = 5 * 60 * 1000; // 5 minutes
+  const windowMs = 5 * 60 * 1000;
   const timestamps = (ipSubmissions.get(ip) || []).filter((t) => now - t < windowMs);
 
   if (timestamps.length >= 3) {
-    return false; // Rate limited
+    return false;
   }
 
   timestamps.push(now);
@@ -84,7 +80,7 @@ function checkRateLimit(ip: string): boolean {
 function sanitizeText(input: string): string {
   if (!input) return '';
   return input
-    .replace(/<[^>]*>/g, '') // remove HTML tags
+    .replace(/<[^>]*>/g, '')
     .replace(/[<>'"&]/g, (char) => {
       switch (char) {
         case '<':
@@ -104,9 +100,6 @@ function sanitizeText(input: string): string {
     .trim();
 }
 
-/**
- * Format relative date for UI
- */
 function formatRelativeDate(isoDate: string): string {
   try {
     const past = new Date(isoDate).getTime();
@@ -128,190 +121,104 @@ function formatRelativeDate(isoDate: string): string {
   }
 }
 
-let initPromise: Promise<void> | null = null;
-let isInitialized = false;
-
-function loadJsonBackup(): void {
-  storageEngine = 'json';
+/**
+ * Sync from Upstash / Vercel KV cloud if configured
+ */
+async function syncFromCloud(): Promise<boolean> {
+  if (!KV_URL || !KV_TOKEN) return false;
   try {
-    if (fs.existsSync(JSON_FILE)) {
-      const raw = fs.readFileSync(JSON_FILE, 'utf-8');
-      jsonReviews = JSON.parse(raw);
-    } else {
-      jsonReviews = [];
+    const res = await fetch(`${KV_URL}/get/rapidex_reviews`, {
+      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { result?: string };
+      if (data?.result) {
+        memoryReviews = JSON.parse(data.result);
+        return true;
+      }
     }
   } catch (err) {
-    console.warn('[Database] Failed to read JSON reviews file, resetting to empty array:', err);
-    jsonReviews = [];
+    console.warn('[Database] Cloud KV sync error:', err);
   }
+  return false;
 }
 
-function saveJsonBackup(): void {
+/**
+ * Save to Upstash / Vercel KV cloud if configured
+ */
+async function syncToCloud(): Promise<void> {
+  if (!KV_URL || !KV_TOKEN) return;
   try {
-    fs.writeFileSync(JSON_FILE, JSON.stringify(jsonReviews, null, 2), 'utf-8');
+    await fetch(`${KV_URL}/set/rapidex_reviews`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${KV_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(JSON.stringify(memoryReviews)),
+    });
   } catch (err) {
-    console.error('[Database] Failed to write JSON reviews file:', err);
-  }
-}
-
-export function saveDatabase(): void {
-  if (storageEngine === 'sqlite' && db) {
-    try {
-      const data = db.export();
-      const buffer = Buffer.from(data);
-      fs.writeFileSync(SQLITE_FILE, buffer);
-    } catch (err) {
-      console.error('[Database] Failed to write sqlite db to disk:', err);
-    }
-  } else if (storageEngine === 'json') {
-    saveJsonBackup();
+    console.warn('[Database] Cloud KV save error:', err);
   }
 }
 
 /**
- * Initialize SQLite database with JSON fallback
+ * Initialize database and load persisted reviews
  */
 export async function initDatabase(): Promise<void> {
-  if (isInitialized) return;
-  if (initPromise) return initPromise;
+  if (isLoaded) return;
 
-  initPromise = (async () => {
-    try {
-      if (!fs.existsSync(STORAGE_DIR)) {
-        fs.mkdirSync(STORAGE_DIR, { recursive: true });
-      }
+  // 1. Try Cloud KV
+  const cloudOk = await syncFromCloud();
+  if (cloudOk) {
+    isLoaded = true;
+    return;
+  }
 
-      // Attempt to initialize SqlJs
-      try {
-        if (!SQL) {
-          SQL = await initSqlJs();
-        }
-
-        if (fs.existsSync(SQLITE_FILE)) {
-          try {
-            const fileBuffer = fs.readFileSync(SQLITE_FILE);
-            db = new SQL.Database(fileBuffer);
-          } catch {
-            db = new SQL.Database();
-          }
-        } else {
-          db = new SQL.Database();
-        }
-
-        db.run(`
-          CREATE TABLE IF NOT EXISTS reviews (
-            id TEXT PRIMARY KEY,
-            author_name TEXT NOT NULL,
-            country TEXT,
-            city TEXT NOT NULL,
-            rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5),
-            comment TEXT NOT NULL,
-            transaction_id TEXT,
-            corridor TEXT DEFAULT 'RUSSIA_TO_AFRICA',
-            verified INTEGER DEFAULT 1,
-            ip_address TEXT,
-            status TEXT DEFAULT 'approved',
-            created_at TEXT NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS idx_reviews_status_created ON reviews(status, created_at DESC);
-        `);
-
-        try {
-          db.run('ALTER TABLE reviews ADD COLUMN country TEXT;');
-        } catch {
-          // Column already exists
-        }
-
-        storageEngine = 'sqlite';
-        console.log(`[Database] SQLite initialized successfully in ${SQLITE_FILE}`);
-      } catch (sqlJsError) {
-        console.warn('[Database] sql.js initialization failed or wasm unavailable, activating JSON storage engine:', sqlJsError);
-        loadJsonBackup();
-        console.log(`[Database] JSON storage engine active at ${JSON_FILE}`);
-      }
-
-      isInitialized = true;
-    } catch (err) {
-      console.error('[Database] Initialization error:', err);
-      loadJsonBackup();
-      isInitialized = true;
+  // 2. Try Local / /tmp disk file
+  try {
+    if (fs.existsSync(JSON_FILE)) {
+      const raw = fs.readFileSync(JSON_FILE, 'utf-8');
+      memoryReviews = JSON.parse(raw);
+    } else {
+      memoryReviews = [];
     }
-  })();
+  } catch (err) {
+    console.warn('[Database] Failed to read JSON file, initializing empty:', err);
+    memoryReviews = [];
+  }
 
-  return initPromise;
+  isLoaded = true;
 }
 
-// Auto-trigger initialization in background
-initDatabase().catch((e) => console.error('[Database] Pre-init background error:', e));
-
-async function ensureDatabase(): Promise<void> {
-  if (!isInitialized) {
-    await initDatabase();
+export function saveDatabase(): void {
+  try {
+    if (!fs.existsSync(STORAGE_DIR)) {
+      fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    }
+    fs.writeFileSync(JSON_FILE, JSON.stringify(memoryReviews, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[Database] Failed to write local JSON file:', err);
   }
+  syncToCloud().catch(() => {});
 }
 
 /**
  * Fetch all approved reviews
  */
 export async function getAllReviews(): Promise<{ reviews: SqliteReview[]; stats: ReviewStats }> {
-  await ensureDatabase();
-
-  if (storageEngine === 'sqlite' && db) {
-    try {
-      const query = `
-        SELECT id, author_name, city, rating, comment, transaction_id, corridor, verified, created_at, country
-        FROM reviews
-        WHERE status = 'approved'
-        ORDER BY created_at DESC
-      `;
-
-      const results = db.exec(query);
-      if (!results.length || !results[0].values.length) {
-        return { reviews: [], stats: { averageRating: '0.0', totalReviews: 0 } };
-      }
-
-      const rows = results[0].values;
-      let totalRating = 0;
-
-      const reviews: SqliteReview[] = rows.map((row) => {
-        const rating = Number(row[3]) || 5;
-        totalRating += rating;
-        const createdAt = String(row[8]);
-        const country = row[9] ? String(row[9]) : undefined;
-
-        return {
-          id: String(row[0]),
-          authorName: String(row[1]),
-          country,
-          city: String(row[2]),
-          rating,
-          comment: String(row[4]),
-          transactionId: row[5] ? String(row[5]) : undefined,
-          corridor: (String(row[6]) === 'AFRICA_TO_RUSSIA' ? 'AFRICA_TO_RUSSIA' : 'RUSSIA_TO_AFRICA') as 'RUSSIA_TO_AFRICA' | 'AFRICA_TO_RUSSIA',
-          verified: Boolean(row[7]),
-          date: formatRelativeDate(createdAt),
-          createdAt,
-        };
-      });
-
-      const averageRating = (totalRating / reviews.length).toFixed(1);
-
-      return {
-        reviews,
-        stats: {
-          averageRating,
-          totalReviews: reviews.length,
-        },
-      };
-    } catch (err) {
-      console.error('[Database] SQLite query error, falling back to JSON:', err);
-    }
+  if (!isLoaded) {
+    await initDatabase();
   }
 
-  // JSON storage fallback
-  const approved = jsonReviews
+  // If cloud is enabled, refresh from cloud
+  if (KV_URL && KV_TOKEN) {
+    await syncFromCloud();
+  }
+
+  const approved = memoryReviews
     .filter((r) => r.status === 'approved')
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   if (!approved.length) {
     return { reviews: [], stats: { averageRating: '0.0', totalReviews: 0 } };
@@ -322,16 +229,16 @@ export async function getAllReviews(): Promise<{ reviews: SqliteReview[]; stats:
     totalRating += r.rating;
     return {
       id: r.id,
-      authorName: r.author_name,
-      country: r.country || undefined,
+      authorName: r.authorName,
+      country: r.country,
       city: r.city,
       rating: r.rating,
       comment: r.comment,
-      transactionId: r.transaction_id || undefined,
-      corridor: (r.corridor === 'AFRICA_TO_RUSSIA' ? 'AFRICA_TO_RUSSIA' : 'RUSSIA_TO_AFRICA') as 'RUSSIA_TO_AFRICA' | 'AFRICA_TO_RUSSIA',
-      verified: Boolean(r.verified),
-      date: formatRelativeDate(r.created_at),
-      createdAt: r.created_at,
+      transactionId: r.transactionId,
+      corridor: r.corridor,
+      verified: r.verified,
+      date: formatRelativeDate(r.createdAt),
+      createdAt: r.createdAt,
     };
   });
 
@@ -347,26 +254,7 @@ export async function getAllReviews(): Promise<{ reviews: SqliteReview[]; stats:
 }
 
 /**
- * Clear all reviews
- */
-export async function clearAllReviews(): Promise<{ success: boolean; count: number }> {
-  await ensureDatabase();
-  try {
-    if (storageEngine === 'sqlite' && db) {
-      db.run('DELETE FROM reviews;');
-    }
-    jsonReviews = [];
-    saveDatabase();
-    console.log('[Database] All reviews cleared.');
-    return { success: true, count: 0 };
-  } catch (err) {
-    console.error('[Database] Failed to clear reviews:', err);
-    return { success: false, count: 0 };
-  }
-}
-
-/**
- * Insert a verified real review with anti-spam check
+ * Insert a verified real review
  */
 export async function insertReview(payload: {
   authorName: string;
@@ -378,7 +266,9 @@ export async function insertReview(payload: {
   corridor?: 'RUSSIA_TO_AFRICA' | 'AFRICA_TO_RUSSIA';
   ipAddress?: string;
 }): Promise<{ success: boolean; review?: SqliteReview; error?: string }> {
-  await ensureDatabase();
+  if (!isLoaded) {
+    await initDatabase();
+  }
 
   const ip = payload.ipAddress || 'unknown';
   if (!checkRateLimit(ip)) {
@@ -408,7 +298,6 @@ export async function insertReview(payload: {
       return { success: false, error: 'Veuillez sélectionner votre ville en Russie.' };
     }
   } else {
-    // African country selected
     if (cleanCountry.length >= 2 && !cleanCity) {
       cleanCity = cleanCountry;
     } else if (cleanCity.length < 2) {
@@ -423,7 +312,25 @@ export async function insertReview(payload: {
   const id = `rev_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const nowIso = new Date().toISOString();
 
-  const newReview: SqliteReview = {
+  const newStored: StoredReview = {
+    id,
+    authorName: cleanName,
+    country: cleanCountry || undefined,
+    city: cleanCity,
+    rating,
+    comment: cleanComment,
+    transactionId: cleanTxId,
+    corridor,
+    verified: true,
+    ipAddress: ip,
+    status: 'approved',
+    createdAt: nowIso,
+  };
+
+  memoryReviews.unshift(newStored);
+  saveDatabase();
+
+  const publicReview: SqliteReview = {
     id,
     authorName: cleanName,
     country: cleanCountry || undefined,
@@ -437,36 +344,18 @@ export async function insertReview(payload: {
     createdAt: nowIso,
   };
 
-  try {
-    if (storageEngine === 'sqlite' && db) {
-      db.run(
-        `INSERT INTO reviews (id, author_name, country, city, rating, comment, transaction_id, corridor, verified, ip_address, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'approved', ?)`,
-        [id, cleanName, cleanCountry || null, cleanCity, rating, cleanComment, cleanTxId || null, corridor, ip, nowIso]
-      );
-    } else {
-      jsonReviews.push({
-        id,
-        author_name: cleanName,
-        country: cleanCountry || null,
-        city: cleanCity,
-        rating,
-        comment: cleanComment,
-        transaction_id: cleanTxId || null,
-        corridor,
-        verified: 1,
-        ip_address: ip,
-        status: 'approved',
-        created_at: nowIso,
-      });
-    }
+  return { success: true, review: publicReview };
+}
 
-    saveDatabase();
-
-    return { success: true, review: newReview };
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Storage error';
-    console.error('[Database] Failed to insert review:', err);
-    return { success: false, error: `Erreur d'enregistrement : ${msg}` };
+/**
+ * Clear all reviews
+ */
+export async function clearAllReviews(): Promise<{ success: boolean; count: number }> {
+  if (!isLoaded) {
+    await initDatabase();
   }
+  memoryReviews = [];
+  saveDatabase();
+  console.log('[Database] All reviews cleared.');
+  return { success: true, count: 0 };
 }
