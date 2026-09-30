@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "test": "bun src/utils/calculator.test.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "push": "bun scripts/push.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
