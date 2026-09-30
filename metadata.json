@@ -1,0 +1,6 @@
+{
+  "name": "Rapidex - Transfert d'Argent Russie ⇄ Afrique",
+  "description": "Service rapide et sécurisé de transfert d'argent entre la Russie et l'Afrique avec calcul des taux en temps réel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
