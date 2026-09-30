@@ -7,5 +7,7 @@ coverage/
 .env*
 !.env.example
 data/*.sqlite
+data/*.json
 .vercel
+*.write_test
 

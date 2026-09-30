@@ -102,28 +102,38 @@ app.get('/api/rates', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/reviews - Real reviews from SQLite database
-app.get('/api/reviews', (_req: Request, res: Response) => {
+// Middleware to ensure Database is ready before any /api request
+app.use('/api', async (_req: Request, _res: Response, next) => {
   try {
-    const data = getAllReviews();
+    await initDatabase();
+  } catch (err) {
+    console.error('[API Middleware] DB init error:', err);
+  }
+  next();
+});
+
+// GET /api/reviews - Real reviews from database
+app.get('/api/reviews', async (_req: Request, res: Response) => {
+  try {
+    const data = await getAllReviews();
     res.json({
       success: true,
       reviews: data.reviews,
       stats: data.stats,
     });
   } catch (err: unknown) {
-    console.error('Error fetching reviews from SQLite:', err);
+    console.error('Error fetching reviews:', err);
     res.status(500).json({ success: false, message: 'Erreur lors du chargement des avis' });
   }
 });
 
-// POST /api/reviews - Insert authentic review into SQLite with anti-spam check
-app.post('/api/reviews', (req: Request, res: Response) => {
+// POST /api/reviews - Insert authentic review with anti-spam check
+app.post('/api/reviews', async (req: Request, res: Response) => {
   try {
     const { authorName, country, city, rating, comment, corridor, transactionId } = req.body;
     const ipAddress = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
 
-    const result = insertReview({
+    const result = await insertReview({
       authorName,
       country,
       city,
@@ -138,7 +148,7 @@ app.post('/api/reviews', (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: result.error });
     }
 
-    const updated = getAllReviews();
+    const updated = await getAllReviews();
     res.status(201).json({
       success: true,
       review: result.review,
@@ -146,18 +156,18 @@ app.post('/api/reviews', (req: Request, res: Response) => {
       stats: updated.stats,
     });
   } catch (err: unknown) {
-    console.error('Error creating review in SQLite:', err);
+    console.error('Error creating review:', err);
     res.status(500).json({ success: false, message: 'Erreur lors de l’enregistrement de l’avis' });
   }
 });
 
-// DELETE /api/reviews - Clear all reviews from SQLite
-app.delete('/api/reviews', (_req: Request, res: Response) => {
+// DELETE /api/reviews - Clear all reviews
+app.delete('/api/reviews', async (_req: Request, res: Response) => {
   try {
-    const result = clearAllReviews();
+    const result = await clearAllReviews();
     res.json({ success: result.success, message: 'Tous les avis ont été réinitialisés avec succès.' });
   } catch (err: unknown) {
-    console.error('Error clearing reviews from SQLite:', err);
+    console.error('Error clearing reviews:', err);
     res.status(500).json({ success: false, message: 'Erreur lors de la suppression des avis.' });
   }
 });
