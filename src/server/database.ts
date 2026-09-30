@@ -53,9 +53,16 @@ function getStorageDir(): string {
 const STORAGE_DIR = getStorageDir();
 const JSON_FILE = path.join(STORAGE_DIR, 'rapidex_reviews.json');
 
-// Optional Upstash / Vercel KV Cloud config for global sync across all visitors
-const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+// Upstash / Vercel KV Cloud config for global sync across all visitors worldwide
+const KV_URL =
+  process.env.KV_REST_API_URL ||
+  process.env.UPSTASH_REDIS_REST_URL ||
+  'https://emerging-fowl-323338.upstash.io';
+
+const KV_TOKEN =
+  process.env.KV_REST_API_TOKEN ||
+  process.env.UPSTASH_REDIS_REST_TOKEN ||
+  'gQAAAAAABO8KAAIgcDI0Y2IyYmY1ZjM0NTE0ZWYxOWYwOTM0ZDNhYmY1YmUwZQ';
 
 let memoryReviews: StoredReview[] = [];
 let isLoaded = false;
@@ -149,13 +156,13 @@ async function syncFromCloud(): Promise<boolean> {
 async function syncToCloud(): Promise<void> {
   if (!KV_URL || !KV_TOKEN) return;
   try {
-    await fetch(`${KV_URL}/set/rapidex_reviews`, {
+    await fetch(KV_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${KV_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(JSON.stringify(memoryReviews)),
+      body: JSON.stringify(['SET', 'rapidex_reviews', JSON.stringify(memoryReviews)]),
     });
   } catch (err) {
     console.warn('[Database] Cloud KV save error:', err);
