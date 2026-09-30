@@ -10,13 +10,65 @@
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="theme-color" content="#0B1120" />
+
+    <!-- Anti-AI Crawler and Anti-Cache Protection -->
+    <meta name="robots" content="noarchive, noimageindex" />
+    <meta name="googlebot" content="noarchive" />
+    <meta name="google-extended" content="none" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Anti-Inspection & DevTools Guard -->
+    <script>
+      (function() {
+        // Disable context menu (right click)
+        document.addEventListener('contextmenu', function(e) {
+          e.preventDefault();
+        });
+
+        // Block inspection key combinations
+        document.addEventListener('keydown', function(e) {
+          // Allow normal typing inside input and textarea
+          var tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : '';
+          var isInput = tag === 'input' || tag === 'textarea' || tag === 'select';
+
+          // F12 key
+          if (e.key === 'F12' || e.keyCode === 123) {
+            e.preventDefault();
+            return false;
+          }
+
+          // Ctrl+Shift+I / Cmd+Opt+I (DevTools), Ctrl+Shift+J (Console), Ctrl+Shift+C (Inspect)
+          if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'I' || e.key === 'i' || e.key === 'J' || e.key === 'j' || e.key === 'C' || e.key === 'c')) {
+            e.preventDefault();
+            return false;
+          }
+
+          // Ctrl+U / Cmd+U (View Source)
+          if ((e.ctrlKey || e.metaKey) && (e.key === 'U' || e.key === 'u')) {
+            e.preventDefault();
+            return false;
+          }
+
+          // Ctrl+S / Cmd+S (Save Page)
+          if (!isInput && (e.ctrlKey || e.metaKey) && (e.key === 'S' || e.key === 's')) {
+            e.preventDefault();
+            return false;
+          }
+        });
+
+        // Console warning banner
+        try {
+          var notice = '%c⚠️ RAPIDEX - ESPACE SÉCURISÉ %c\nLe code source de cette application est protégé contre l\'analyse et l\'extraction non autorisée.';
+          console.log(notice, 'background:#151E33; color:#EAB308; font-size:16px; font-weight:bold; padding:8px 12px; border-radius:6px;', 'color:#94a3b8; font-size:12px; margin-top:4px;');
+        } catch(_) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#0B1120] text-slate-100 antialiased selection:bg-amber-500/30 selection:text-amber-200">
+  <body class="bg-[#0B1120] text-slate-100 antialiased selection:bg-amber-500/30 selection:text-amber-200 select-none">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
